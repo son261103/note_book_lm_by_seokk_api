@@ -46,14 +46,8 @@ def start_celery_beat():
 
         logging.info("⏰ Starting Celery Beat Scheduler...")
 
-        # Start Celery beat
-        celery_app.start(
-            argv=[
-                "celery",
-                "beat",
-                "--loglevel=info",
-            ]
-        )
+        # Start Celery beat using beat_main instead of start
+        celery_app.Beat().run()
     except Exception as e:
         logging.error(f"❌ Celery Beat failed to start: {e}")
         sys.exit(1)
