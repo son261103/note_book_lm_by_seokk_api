@@ -92,18 +92,10 @@ then include it in the `Authorization` header as `Bearer <token>`.
             "name": "connectors",
             "description": "External service connectors - Google Calendar, Gmail, Airtable, Luma",
         },
-        {
-            "name": "logs",
-            "description": "System logs and activity tracking",
-        },
-        {
-            "name": "crud",
-            "description": "General CRUD operations",
-        },
     ],
     swagger_ui_parameters={
         "defaultModelsExpandDepth": -1,  # Hide schemas section by default
-        "docExpansion": "list",  # Expand only tags by default
+        "docExpansion": "none",  # Collapse all tags by default
         "filter": True,  # Enable search filter
         "syntaxHighlight.theme": "monokai",  # Syntax highlighting theme
     },
@@ -171,7 +163,7 @@ if config.AUTH_TYPE == "GOOGLE":
         ],  # blocks OAuth registration when disabled
     )
 
-app.include_router(crud_router, prefix="/api/v1", tags=["crud"])
+app.include_router(crud_router, prefix="/api/v1")
 
 
 @app.get("/verify-token")
