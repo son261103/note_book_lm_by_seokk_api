@@ -77,10 +77,10 @@ class DoclingService:
             # Create pipeline options with version-safe attribute checking
             pipeline_options = PdfPipelineOptions()
 
-            # Disable OCR (user request)
+            # Enable OCR for image text extraction
             if hasattr(pipeline_options, "do_ocr"):
-                pipeline_options.do_ocr = False
-                logger.info("⚠️ OCR disabled by user request")
+                pipeline_options.do_ocr = True
+                logger.info("✅ OCR enabled for image text extraction")
             else:
                 logger.warning("⚠️ OCR attribute not available in this Docling version")
 
