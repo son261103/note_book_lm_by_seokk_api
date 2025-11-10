@@ -27,7 +27,7 @@ from app.utils.validators import (
     validate_top_k,
 )
 
-router = APIRouter()
+router = APIRouter(tags=["chats"])
 
 
 @router.post("/chat")

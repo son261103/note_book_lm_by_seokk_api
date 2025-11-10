@@ -15,7 +15,7 @@ from app.schemas import LLMConfigCreate, LLMConfigRead, LLMConfigUpdate
 from app.services.llm_service import validate_llm_config
 from app.users import current_active_user
 
-router = APIRouter()
+router = APIRouter(tags=["llm-configs"])
 
 
 # Helper function to check search space access

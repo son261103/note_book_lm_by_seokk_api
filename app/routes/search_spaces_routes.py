@@ -7,7 +7,7 @@ from app.schemas import SearchSpaceCreate, SearchSpaceRead, SearchSpaceUpdate
 from app.users import current_active_user
 from app.utils.check_ownership import check_ownership
 
-router = APIRouter()
+router = APIRouter(tags=["search-spaces"])
 
 
 @router.post("/searchspaces", response_model=SearchSpaceRead)

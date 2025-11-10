@@ -26,7 +26,7 @@ from app.users import current_active_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["connectors"])
 
 
 def get_google_flow():

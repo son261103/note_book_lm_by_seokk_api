@@ -27,7 +27,89 @@ def registration_allowed():
     return True
 
 
-app = FastAPI(lifespan=lifespan)
+# Swagger/OpenAPI Configuration
+app = FastAPI(
+    lifespan=lifespan,
+    title="SurfSense API",
+    description="""
+## SurfSense Backend API Documentation
+
+This is a comprehensive API for managing search spaces, documents, chats, podcasts, and various integrations.
+
+### Features:
+* 🔐 **Authentication**: JWT-based authentication with Google OAuth support
+* 📚 **Search Spaces**: Manage your search spaces and configurations
+* 📄 **Documents**: Upload and manage documents with various formats
+* 💬 **Chats**: Interactive chat functionality with LLM integration
+* 🎙️ **Podcasts**: Generate and manage podcasts from your content
+* 🔌 **Connectors**: Integrate with Google Calendar, Gmail, Airtable, and Luma
+* 🤖 **LLM Configs**: Configure and manage multiple LLM providers
+* 📊 **Logs**: Track and monitor system activities
+
+### Authentication:
+Most endpoints require authentication. Use the `/auth/jwt/login` endpoint to obtain a JWT token,
+then include it in the `Authorization` header as `Bearer <token>`.
+    """,
+    version="0.0.8",
+    contact={
+        "name": "SurfSense Team",
+        "url": "https://github.com/yourusername/surfsense",
+    },
+    license_info={
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT",
+    },
+    openapi_tags=[
+        {
+            "name": "auth",
+            "description": "Authentication operations including login, register, password reset, and OAuth",
+        },
+        {
+            "name": "users",
+            "description": "User management operations",
+        },
+        {
+            "name": "search-spaces",
+            "description": "Search space management - create, read, update, delete search spaces",
+        },
+        {
+            "name": "documents",
+            "description": "Document management - upload, process, and manage documents",
+        },
+        {
+            "name": "chats",
+            "description": "Chat operations - create conversations and interact with LLMs",
+        },
+        {
+            "name": "podcasts",
+            "description": "Podcast generation and management from documents or chats",
+        },
+        {
+            "name": "llm-configs",
+            "description": "LLM configuration management - configure multiple LLM providers",
+        },
+        {
+            "name": "connectors",
+            "description": "External service connectors - Google Calendar, Gmail, Airtable, Luma",
+        },
+        {
+            "name": "logs",
+            "description": "System logs and activity tracking",
+        },
+        {
+            "name": "crud",
+            "description": "General CRUD operations",
+        },
+    ],
+    swagger_ui_parameters={
+        "defaultModelsExpandDepth": -1,  # Hide schemas section by default
+        "docExpansion": "list",  # Expand only tags by default
+        "filter": True,  # Enable search filter
+        "syntaxHighlight.theme": "monokai",  # Syntax highlighting theme
+    },
+    docs_url="/docs",  # Swagger UI
+    redoc_url="/redoc",  # ReDoc UI
+)
 
 # Add ProxyHeaders middleware FIRST to trust proxy headers (e.g., from Cloudflare)
 # This ensures FastAPI uses HTTPS in redirects when behind a proxy

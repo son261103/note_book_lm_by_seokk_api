@@ -35,7 +35,7 @@ import os
 os.environ["UNSTRUCTURED_HAS_PATCHED_LOOP"] = "1"
 
 
-router = APIRouter()
+router = APIRouter(tags=["documents"])
 
 
 @router.post("/documents")

@@ -18,7 +18,7 @@ from app.tasks.podcast_tasks import generate_chat_podcast
 from app.users import current_active_user
 from app.utils.check_ownership import check_ownership
 
-router = APIRouter()
+router = APIRouter(tags=["podcasts"])
 
 
 @router.post("/podcasts", response_model=PodcastRead)

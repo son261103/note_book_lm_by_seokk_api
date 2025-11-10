@@ -61,7 +61,7 @@ from app.utils.periodic_scheduler import (
 # Set up logging
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["connectors"])
 
 
 # Use Pydantic's BaseModel here

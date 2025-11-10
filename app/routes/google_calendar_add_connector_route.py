@@ -26,7 +26,7 @@ from app.users import current_active_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["connectors"])
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 REDIRECT_URI = config.GOOGLE_CALENDAR_REDIRECT_URI

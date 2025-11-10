@@ -10,7 +10,7 @@ from app.schemas import LogCreate, LogRead, LogUpdate
 from app.users import current_active_user
 from app.utils.check_ownership import check_ownership
 
-router = APIRouter()
+router = APIRouter(tags=["logs"])
 
 
 @router.post("/logs", response_model=LogRead)
