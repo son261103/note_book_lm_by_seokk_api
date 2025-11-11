@@ -95,16 +95,14 @@ async def fetch_documents_by_ids(
     document_ids: list[int], user_id: str, db_session: AsyncSession
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
-    Fetch documents by their IDs with ownership check using DOCUMENTS mode approach.
+    Fetch documents by their IDs using DOCUMENTS mode approach.
 
-    This function ensures that only documents belonging to the user are fetched,
-    providing security by checking ownership through SearchSpace association.
     Similar to SearchMode.DOCUMENTS, it fetches full documents and concatenates their chunks.
     Also creates source objects for UI display, grouped by document type.
 
     Args:
         document_ids: List of document IDs to fetch
-        user_id: The user ID to check ownership
+        user_id: The user ID (deprecated, kept for compatibility)
         db_session: The database session
 
     Returns:
@@ -114,11 +112,9 @@ async def fetch_documents_by_ids(
         return [], []
 
     try:
-        # Query documents with ownership check
+        # Query documents
         result = await db_session.execute(
-            select(Document)
-            .join(SearchSpace)
-            .filter(Document.id.in_(document_ids), SearchSpace.user_id == user_id)
+            select(Document).filter(Document.id.in_(document_ids))
         )
         documents = result.scalars().all()
 

@@ -11,7 +11,6 @@ from app.db import (
     Document,
     DocumentType,
     SearchSpace,
-    User,
     get_async_session,
 )
 from app.schemas import (
@@ -21,8 +20,6 @@ from app.schemas import (
     DocumentWithChunksRead,
     PaginatedResponse,
 )
-from app.users import current_active_user
-from app.utils.check_ownership import check_ownership
 
 try:
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
@@ -42,11 +39,17 @@ router = APIRouter(tags=["documents"])
 async def create_documents(
     request: DocumentsCreate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        # Check if the user owns the search space
-        await check_ownership(session, SearchSpace, request.search_space_id, user)
+        # Verify search space exists
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == request.search_space_id)
+        )
+        if not result.scalars().first():
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
 
         if request.document_type == DocumentType.EXTENSION:
             from app.tasks.celery_tasks.document_tasks import (
@@ -63,21 +66,21 @@ async def create_documents(
                     "content": individual_document.content,
                 }
                 process_extension_document_task.delay(
-                    document_dict, request.search_space_id, str(user.id)
+                    document_dict, request.search_space_id, None  # No user_id
                 )
         elif request.document_type == DocumentType.CRAWLED_URL:
             from app.tasks.celery_tasks.document_tasks import process_crawled_url_task
 
             for url in request.content:
                 process_crawled_url_task.delay(
-                    url, request.search_space_id, str(user.id)
+                    url, request.search_space_id, None  # No user_id
                 )
         elif request.document_type == DocumentType.YOUTUBE_VIDEO:
             from app.tasks.celery_tasks.document_tasks import process_youtube_video_task
 
             for url in request.content:
                 process_youtube_video_task.delay(
-                    url, request.search_space_id, str(user.id)
+                    url, request.search_space_id, None  # No user_id
                 )
         else:
             raise HTTPException(status_code=400, detail="Invalid document type")
@@ -98,10 +101,17 @@ async def create_documents_file_upload(
     files: list[UploadFile],
     search_space_id: int = Form(...),
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        await check_ownership(session, SearchSpace, search_space_id, user)
+        # Verify search space exists
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == search_space_id)
+        )
+        if not result.scalars().first():
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
 
         if not files:
             raise HTTPException(status_code=400, detail="No files provided")
@@ -128,7 +138,7 @@ async def create_documents_file_upload(
                 )
 
                 process_file_upload_task.delay(
-                    temp_path, file.filename, search_space_id, str(user.id)
+                    temp_path, file.filename, search_space_id, None  # No user_id
                 )
             except Exception as e:
                 raise HTTPException(
@@ -155,10 +165,9 @@ async def read_documents(
     search_space_id: int | None = None,
     document_types: str | None = None,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """
-    List documents owned by the current user, with optional filtering and pagination.
+    List all documents with optional filtering and pagination.
 
     Args:
         skip: Absolute number of items to skip from the beginning. If provided, it takes precedence over 'page'.
@@ -167,21 +176,17 @@ async def read_documents(
         search_space_id: If provided, restrict results to a specific search space.
         document_types: Comma-separated list of document types to filter by (e.g., "EXTENSION,FILE,SLACK_CONNECTOR").
         session: Database session (injected).
-        user: Current authenticated user (injected).
 
     Returns:
-        PaginatedResponse[DocumentRead]: Paginated list of documents visible to the user.
+        PaginatedResponse[DocumentRead]: Paginated list of documents.
 
     Notes:
         - If both 'skip' and 'page' are provided, 'skip' is used.
-        - Results are scoped to documents owned by the current user.
     """
     try:
         from sqlalchemy import func
 
-        query = (
-            select(Document).join(SearchSpace).filter(SearchSpace.user_id == user.id)
-        )
+        query = select(Document)
 
         # Filter by search_space_id if provided
         if search_space_id is not None:
@@ -194,12 +199,7 @@ async def read_documents(
                 query = query.filter(Document.document_type.in_(type_list))
 
         # Get total count
-        count_query = (
-            select(func.count())
-            .select_from(Document)
-            .join(SearchSpace)
-            .filter(SearchSpace.user_id == user.id)
-        )
+        count_query = select(func.count()).select_from(Document)
         if search_space_id is not None:
             count_query = count_query.filter(
                 Document.search_space_id == search_space_id
@@ -257,7 +257,6 @@ async def search_documents(
     search_space_id: int | None = None,
     document_types: str | None = None,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """
     Search documents by title substring, optionally filtered by search_space_id and document_types.
@@ -270,7 +269,6 @@ async def search_documents(
         search_space_id: Filter results to a specific search space. Default: None.
         document_types: Comma-separated list of document types to filter by (e.g., "EXTENSION,FILE,SLACK_CONNECTOR").
         session: Database session (injected).
-        user: Current authenticated user (injected).
 
     Returns:
         PaginatedResponse[DocumentRead]: Paginated list of documents matching the query and filter.
@@ -282,9 +280,7 @@ async def search_documents(
     try:
         from sqlalchemy import func
 
-        query = (
-            select(Document).join(SearchSpace).filter(SearchSpace.user_id == user.id)
-        )
+        query = select(Document)
         if search_space_id is not None:
             query = query.filter(Document.search_space_id == search_space_id)
 
@@ -298,12 +294,7 @@ async def search_documents(
                 query = query.filter(Document.document_type.in_(type_list))
 
         # Get total count
-        count_query = (
-            select(func.count())
-            .select_from(Document)
-            .join(SearchSpace)
-            .filter(SearchSpace.user_id == user.id)
-        )
+        count_query = select(func.count()).select_from(Document)
         if search_space_id is not None:
             count_query = count_query.filter(
                 Document.search_space_id == search_space_id
@@ -357,15 +348,13 @@ async def search_documents(
 async def get_document_type_counts(
     search_space_id: int | None = None,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """
-    Get counts of documents by type for the current user.
+    Get counts of documents by type.
 
     Args:
         search_space_id: If provided, restrict counts to a specific search space.
         session: Database session (injected).
-        user: Current authenticated user (injected).
 
     Returns:
         Dict mapping document types to their counts.
@@ -373,11 +362,8 @@ async def get_document_type_counts(
     try:
         from sqlalchemy import func
 
-        query = (
-            select(Document.document_type, func.count(Document.id))
-            .join(SearchSpace)
-            .filter(SearchSpace.user_id == user.id)
-            .group_by(Document.document_type)
+        query = select(Document.document_type, func.count(Document.id)).group_by(
+            Document.document_type
         )
 
         if search_space_id is not None:
@@ -397,7 +383,6 @@ async def get_document_type_counts(
 async def get_document_by_chunk_id(
     chunk_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """
     Retrieves a document based on a chunk ID, including all its chunks ordered by creation time.
@@ -413,19 +398,18 @@ async def get_document_by_chunk_id(
                 status_code=404, detail=f"Chunk with id {chunk_id} not found"
             )
 
-        # Get the associated document and verify ownership
+        # Get the associated document
         document_result = await session.execute(
             select(Document)
             .options(selectinload(Document.chunks))
-            .join(SearchSpace)
-            .filter(Document.id == chunk.document_id, SearchSpace.user_id == user.id)
+            .filter(Document.id == chunk.document_id)
         )
         document = document_result.scalars().first()
 
         if not document:
             raise HTTPException(
                 status_code=404,
-                detail="Document not found or you don't have access to it",
+                detail="Document not found",
             )
 
         # Sort chunks by creation time
@@ -454,13 +438,10 @@ async def get_document_by_chunk_id(
 async def read_document(
     document_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
         result = await session.execute(
-            select(Document)
-            .join(SearchSpace)
-            .filter(Document.id == document_id, SearchSpace.user_id == user.id)
+            select(Document).filter(Document.id == document_id)
         )
         document = result.scalars().first()
 
@@ -490,14 +471,11 @@ async def update_document(
     document_id: int,
     document_update: DocumentUpdate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        # Query the document directly instead of using read_document function
+        # Query the document directly
         result = await session.execute(
-            select(Document)
-            .join(SearchSpace)
-            .filter(Document.id == document_id, SearchSpace.user_id == user.id)
+            select(Document).filter(Document.id == document_id)
         )
         db_document = result.scalars().first()
 
@@ -535,14 +513,11 @@ async def update_document(
 async def delete_document(
     document_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        # Query the document directly instead of using read_document function
+        # Query the document directly
         result = await session.execute(
-            select(Document)
-            .join(SearchSpace)
-            .filter(Document.id == document_id, SearchSpace.user_id == user.id)
+            select(Document).filter(Document.id == document_id)
         )
         document = result.scalars().first()
 

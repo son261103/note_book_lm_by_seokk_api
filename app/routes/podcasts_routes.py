@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from app.db import Chat, Podcast, SearchSpace, User, get_async_session
+from app.db import Chat, Podcast, SearchSpace, get_async_session
 from app.schemas import (
     PodcastCreate,
     PodcastGenerateRequest,
@@ -15,8 +15,6 @@ from app.schemas import (
     PodcastUpdate,
 )
 from app.tasks.podcast_tasks import generate_chat_podcast
-from app.users import current_active_user
-from app.utils.check_ownership import check_ownership
 
 router = APIRouter(tags=["podcasts"])
 
@@ -25,10 +23,18 @@ router = APIRouter(tags=["podcasts"])
 async def create_podcast(
     podcast: PodcastCreate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        await check_ownership(session, SearchSpace, podcast.search_space_id, user)
+        # Verify search space exists
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == podcast.search_space_id)
+        )
+        if not result.scalars().first():
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
+
         db_podcast = Podcast(**podcast.model_dump())
         session.add(db_podcast)
         await session.commit()
@@ -59,17 +65,12 @@ async def read_podcasts(
     skip: int = 0,
     limit: int = 100,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     if skip < 0 or limit < 1:
         raise HTTPException(status_code=400, detail="Invalid pagination parameters")
     try:
         result = await session.execute(
-            select(Podcast)
-            .join(SearchSpace)
-            .filter(SearchSpace.user_id == user.id)
-            .offset(skip)
-            .limit(limit)
+            select(Podcast).offset(skip).limit(limit)
         )
         return result.scalars().all()
     except SQLAlchemyError:
@@ -82,19 +83,16 @@ async def read_podcasts(
 async def read_podcast(
     podcast_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
         result = await session.execute(
-            select(Podcast)
-            .join(SearchSpace)
-            .filter(Podcast.id == podcast_id, SearchSpace.user_id == user.id)
+            select(Podcast).filter(Podcast.id == podcast_id)
         )
         podcast = result.scalars().first()
         if not podcast:
             raise HTTPException(
                 status_code=404,
-                detail="Podcast not found or you don't have permission to access it",
+                detail="Podcast not found",
             )
         return podcast
     except HTTPException as he:
@@ -110,10 +108,9 @@ async def update_podcast(
     podcast_id: int,
     podcast_update: PodcastUpdate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        db_podcast = await read_podcast(podcast_id, session, user)
+        db_podcast = await read_podcast(podcast_id, session)
         update_data = podcast_update.model_dump(exclude_unset=True)
         for key, value in update_data.items():
             setattr(db_podcast, key, value)
@@ -138,10 +135,9 @@ async def update_podcast(
 async def delete_podcast(
     podcast_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        db_podcast = await read_podcast(podcast_id, session, user)
+        db_podcast = await read_podcast(podcast_id, session)
         await session.delete(db_podcast)
         await session.commit()
         return {"message": "Podcast deleted successfully"}
@@ -155,7 +151,7 @@ async def delete_podcast(
 
 
 async def generate_chat_podcast_with_new_session(
-    chat_id: int, search_space_id: int, podcast_title: str, user_id: int
+    chat_id: int, search_space_id: int, podcast_title: str, user_id: int | None = None
 ):
     """Create a new session and process chat podcast generation."""
     from app.db import async_session_maker
@@ -175,22 +171,23 @@ async def generate_chat_podcast_with_new_session(
 async def generate_podcast(
     request: PodcastGenerateRequest,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        # Check if the user owns the search space
-        await check_ownership(session, SearchSpace, request.search_space_id, user)
+        # Verify search space exists
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == request.search_space_id)
+        )
+        if not result.scalars().first():
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
 
         if request.type == "CHAT":
-            # Verify that all chat IDs belong to this user and search space
-            query = (
-                select(Chat)
-                .filter(
-                    Chat.id.in_(request.ids),
-                    Chat.search_space_id == request.search_space_id,
-                )
-                .join(SearchSpace)
-                .filter(SearchSpace.user_id == user.id)
+            # Verify that all chat IDs belong to this search space
+            query = select(Chat).filter(
+                Chat.id.in_(request.ids),
+                Chat.search_space_id == request.search_space_id,
             )
 
             result = await session.execute(query)
@@ -201,7 +198,7 @@ async def generate_podcast(
             if len(valid_chat_ids) != len(request.ids):
                 raise HTTPException(
                     status_code=403,
-                    detail="One or more chat IDs do not belong to this user or search space",
+                    detail="One or more chat IDs do not belong to this search space",
                 )
 
             from app.tasks.celery_tasks.podcast_tasks import (
@@ -211,7 +208,7 @@ async def generate_podcast(
             # Add Celery tasks for each chat ID
             for chat_id in valid_chat_ids:
                 generate_chat_podcast_task.delay(
-                    chat_id, request.search_space_id, request.podcast_title, user.id
+                    chat_id, request.search_space_id, request.podcast_title, None  # No user_id
                 )
 
         return {
@@ -241,22 +238,19 @@ async def generate_podcast(
 async def stream_podcast(
     podcast_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """Stream a podcast audio file."""
     try:
-        # Get the podcast and check if user has access
+        # Get the podcast
         result = await session.execute(
-            select(Podcast)
-            .join(SearchSpace)
-            .filter(Podcast.id == podcast_id, SearchSpace.user_id == user.id)
+            select(Podcast).filter(Podcast.id == podcast_id)
         )
         podcast = result.scalars().first()
 
         if not podcast:
             raise HTTPException(
                 status_code=404,
-                detail="Podcast not found or you don't have permission to access it",
+                detail="Podcast not found",
             )
 
         # Get the file path

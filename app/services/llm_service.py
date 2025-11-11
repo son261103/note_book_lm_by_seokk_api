@@ -6,7 +6,7 @@ from langchain_litellm import ChatLiteLLM
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from app.db import LLMConfig, UserSearchSpacePreference
+from app.db import LLMConfig
 
 # Configure litellm to automatically drop unsupported parameters
 litellm.drop_params = True
@@ -111,63 +111,34 @@ async def get_user_llm_instance(
     session: AsyncSession, user_id: str, search_space_id: int, role: str
 ) -> ChatLiteLLM | None:
     """
-    Get a ChatLiteLLM instance for a specific user, search space, and role.
+    Get a ChatLiteLLM instance for a specific search space and role.
+
+    Note: After removing user authentication, this function now simply returns
+    the first available LLM config for the search space, regardless of role.
+    The user_id parameter is kept for backward compatibility but is not used.
 
     Args:
         session: Database session
-        user_id: User ID
+        user_id: User ID (deprecated, kept for compatibility)
         search_space_id: Search Space ID
-        role: LLM role ('long_context', 'fast', or 'strategic')
+        role: LLM role ('long_context', 'fast', or 'strategic') - currently ignored
 
     Returns:
         ChatLiteLLM instance or None if not found
     """
     try:
-        # Get user's LLM preferences for this search space
+        # Get the first LLM configuration for this search space
         result = await session.execute(
-            select(UserSearchSpacePreference).where(
-                UserSearchSpacePreference.user_id == user_id,
-                UserSearchSpacePreference.search_space_id == search_space_id,
-            )
-        )
-        preference = result.scalars().first()
-
-        if not preference:
-            logger.error(
-                f"No LLM preferences found for user {user_id} in search space {search_space_id}"
-            )
-            return None
-
-        # Get the appropriate LLM config ID based on role
-        llm_config_id = None
-        if role == LLMRole.LONG_CONTEXT:
-            llm_config_id = preference.long_context_llm_id
-        elif role == LLMRole.FAST:
-            llm_config_id = preference.fast_llm_id
-        elif role == LLMRole.STRATEGIC:
-            llm_config_id = preference.strategic_llm_id
-        else:
-            logger.error(f"Invalid LLM role: {role}")
-            return None
-
-        if not llm_config_id:
-            logger.error(
-                f"No {role} LLM configured for user {user_id} in search space {search_space_id}"
-            )
-            return None
-
-        # Get the LLM configuration
-        result = await session.execute(
-            select(LLMConfig).where(
-                LLMConfig.id == llm_config_id,
-                LLMConfig.search_space_id == search_space_id,
-            )
+            select(LLMConfig)
+            .where(LLMConfig.search_space_id == search_space_id)
+            .order_by(LLMConfig.created_at.asc())
+            .limit(1)
         )
         llm_config = result.scalars().first()
 
         if not llm_config:
             logger.error(
-                f"LLM config {llm_config_id} not found in search space {search_space_id}"
+                f"No LLM config found in search space {search_space_id}"
             )
             return None
 

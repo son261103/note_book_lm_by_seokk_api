@@ -19,10 +19,8 @@ from app.config import config
 from app.db import (
     SearchSourceConnector,
     SearchSourceConnectorType,
-    User,
     get_async_session,
 )
-from app.users import current_active_user
 
 logger = logging.getLogger(__name__)
 
@@ -54,18 +52,17 @@ def get_google_flow():
 
 
 @router.get("/auth/google/calendar/connector/add")
-async def connect_calendar(space_id: int, user: User = Depends(current_active_user)):
+async def connect_calendar(space_id: int):
     try:
         if not space_id:
             raise HTTPException(status_code=400, detail="space_id is required")
 
         flow = get_google_flow()
 
-        # Encode space_id and user_id in state
+        # Encode space_id in state
         state_payload = json.dumps(
             {
                 "space_id": space_id,
-                "user_id": str(user.id),
             }
         )
         state_encoded = base64.urlsafe_b64encode(state_payload.encode()).decode()
@@ -95,7 +92,6 @@ async def calendar_callback(
         decoded_state = base64.urlsafe_b64decode(state.encode()).decode()
         data = json.loads(decoded_state)
 
-        user_id = UUID(data["user_id"])
         space_id = data["space_id"]
 
         flow = get_google_flow()
@@ -105,11 +101,10 @@ async def calendar_callback(
         creds_dict = json.loads(creds.to_json())
 
         try:
-            # Check if a connector with the same type already exists for this search space and user
+            # Check if a connector with the same type already exists for this search space
             result = await session.execute(
                 select(SearchSourceConnector).filter(
                     SearchSourceConnector.search_space_id == space_id,
-                    SearchSourceConnector.user_id == user_id,
                     SearchSourceConnector.connector_type
                     == SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR,
                 )
@@ -118,14 +113,13 @@ async def calendar_callback(
             if existing_connector:
                 raise HTTPException(
                     status_code=409,
-                    detail="A GOOGLE_CALENDAR_CONNECTOR connector already exists in this search space. Each search space can have only one connector of each type per user.",
+                    detail="A GOOGLE_CALENDAR_CONNECTOR connector already exists in this search space.",
                 )
             db_connector = SearchSourceConnector(
                 name="Google Calendar Connector",
                 connector_type=SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR,
                 config=creds_dict,
                 search_space_id=space_id,
-                user_id=user_id,
                 is_indexable=True,
             )
             session.add(db_connector)

@@ -39,7 +39,6 @@ from .search_space import (
     SearchSpaceRead,
     SearchSpaceUpdate,
 )
-from .users import UserCreate, UserRead, UserUpdate
 
 __all__ = [
     "AISDKChatRequest",
@@ -84,7 +83,4 @@ __all__ = [
     "SearchSpaceRead",
     "SearchSpaceUpdate",
     "TimestampModel",
-    "UserCreate",
-    "UserRead",
-    "UserUpdate",
 ]

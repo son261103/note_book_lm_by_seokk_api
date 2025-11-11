@@ -9,10 +9,8 @@ from sqlalchemy.future import select
 from app.db import (
     SearchSourceConnector,
     SearchSourceConnectorType,
-    User,
     get_async_session,
 )
-from app.users import current_active_user
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +27,13 @@ class AddLumaConnectorRequest(BaseModel):
 @router.post("/connectors/luma/add")
 async def add_luma_connector(
     request: AddLumaConnectorRequest,
-    user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
 ):
     """
-    Add a new Luma connector for the authenticated user.
+    Add a new Luma connector.
 
     Args:
         request: The request containing Luma API key and space_id
-        user: Current authenticated user
         session: Database session
 
     Returns:
@@ -47,11 +43,10 @@ async def add_luma_connector(
         HTTPException: If connector already exists or validation fails
     """
     try:
-        # Check if a Luma connector already exists for this search space and user
+        # Check if a Luma connector already exists for this search space
         result = await session.execute(
             select(SearchSourceConnector).filter(
                 SearchSourceConnector.search_space_id == request.space_id,
-                SearchSourceConnector.user_id == user.id,
                 SearchSourceConnector.connector_type
                 == SearchSourceConnectorType.LUMA_CONNECTOR,
             )
@@ -66,7 +61,7 @@ async def add_luma_connector(
             await session.refresh(existing_connector)
 
             logger.info(
-                f"Updated existing Luma connector for user {user.id} in space {request.space_id}"
+                f"Updated existing Luma connector in space {request.space_id}"
             )
 
             return {
@@ -81,7 +76,6 @@ async def add_luma_connector(
             connector_type=SearchSourceConnectorType.LUMA_CONNECTOR,
             config={"api_key": request.api_key},
             search_space_id=request.space_id,
-            user_id=user.id,
             is_indexable=True,
         )
 
@@ -90,7 +84,7 @@ async def add_luma_connector(
         await session.refresh(db_connector)
 
         logger.info(
-            f"Successfully created Luma connector for user {user.id} with ID {db_connector.id}"
+            f"Successfully created Luma connector with ID {db_connector.id}"
         )
 
         return {
@@ -118,15 +112,13 @@ async def add_luma_connector(
 @router.delete("/connectors/luma")
 async def delete_luma_connector(
     space_id: int,
-    user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
 ):
     """
-    Delete the Luma connector for the authenticated user in a specific search space.
+    Delete the Luma connector in a specific search space.
 
     Args:
         space_id: Search space ID
-        user: Current authenticated user
         session: Database session
 
     Returns:
@@ -139,7 +131,6 @@ async def delete_luma_connector(
         result = await session.execute(
             select(SearchSourceConnector).filter(
                 SearchSourceConnector.search_space_id == space_id,
-                SearchSourceConnector.user_id == user.id,
                 SearchSourceConnector.connector_type
                 == SearchSourceConnectorType.LUMA_CONNECTOR,
             )
@@ -149,13 +140,13 @@ async def delete_luma_connector(
         if not connector:
             raise HTTPException(
                 status_code=404,
-                detail="Luma connector not found for this user.",
+                detail="Luma connector not found.",
             )
 
         await session.delete(connector)
         await session.commit()
 
-        logger.info(f"Successfully deleted Luma connector for user {user.id}")
+        logger.info(f"Successfully deleted Luma connector in space {space_id}")
 
         return {"message": "Luma connector deleted successfully"}
 
@@ -173,15 +164,13 @@ async def delete_luma_connector(
 @router.get("/connectors/luma/test")
 async def test_luma_connector(
     space_id: int,
-    user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
 ):
     """
-    Test the Luma connector for the authenticated user in a specific search space.
+    Test the Luma connector in a specific search space.
 
     Args:
         space_id: Search space ID
-        user: Current authenticated user
         session: Database session
 
     Returns:
@@ -191,11 +180,10 @@ async def test_luma_connector(
         HTTPException: If connector doesn't exist or test fails
     """
     try:
-        # Get the Luma connector for this search space and user
+        # Get the Luma connector for this search space
         result = await session.execute(
             select(SearchSourceConnector).filter(
                 SearchSourceConnector.search_space_id == space_id,
-                SearchSourceConnector.user_id == user.id,
                 SearchSourceConnector.connector_type
                 == SearchSourceConnectorType.LUMA_CONNECTOR,
             )

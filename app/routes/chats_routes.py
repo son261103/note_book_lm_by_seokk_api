@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from app.db import Chat, SearchSpace, User, UserSearchSpacePreference, get_async_session
+from app.db import Chat, SearchSpace, get_async_session
 from app.schemas import (
     AISDKChatRequest,
     ChatCreate,
@@ -15,8 +15,6 @@ from app.schemas import (
     ChatUpdate,
 )
 from app.tasks.stream_connector_search_results import stream_connector_search_results
-from app.users import current_active_user
-from app.utils.check_ownership import check_ownership
 from app.utils.validators import (
     validate_connectors,
     validate_document_ids,
@@ -34,7 +32,6 @@ router = APIRouter(tags=["chats"])
 async def handle_chat_data(
     request: AISDKChatRequest,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     # Validate and sanitize all input data
     messages = validate_messages(request.messages)
@@ -56,55 +53,29 @@ async def handle_chat_data(
     )
     search_mode_str = validate_search_mode(request_data.get("search_mode"))
     top_k = validate_top_k(request_data.get("top_k"))
-    # print("RESQUEST DATA:", request_data)
-    # print("SELECTED CONNECTORS:", selected_connectors)
 
-    # Check if the search space belongs to the current user
+    # Get language from search space's LLM configs
     try:
-        await check_ownership(session, SearchSpace, search_space_id, user)
-        language_result = await session.execute(
-            select(UserSearchSpacePreference)
-            .options(
-                selectinload(UserSearchSpacePreference.search_space).selectinload(
-                    SearchSpace.llm_configs
-                ),
-                selectinload(UserSearchSpacePreference.long_context_llm),
-                selectinload(UserSearchSpacePreference.fast_llm),
-                selectinload(UserSearchSpacePreference.strategic_llm),
-            )
-            .filter(
-                UserSearchSpacePreference.search_space_id == search_space_id,
-                UserSearchSpacePreference.user_id == user.id,
-            )
+        search_space_result = await session.execute(
+            select(SearchSpace)
+            .options(selectinload(SearchSpace.llm_configs))
+            .filter(SearchSpace.id == search_space_id)
         )
-        user_preference = language_result.scalars().first()
-        # print("UserSearchSpacePreference:", user_preference)
+        search_space = search_space_result.scalars().first()
+
+        if not search_space:
+            raise HTTPException(
+                status_code=404, detail="Search space not found"
+            )
 
         language = None
-        if (
-            user_preference
-            and user_preference.search_space
-            and user_preference.search_space.llm_configs
-        ):
-            llm_configs = user_preference.search_space.llm_configs
-
-            for preferred_llm in [
-                user_preference.fast_llm,
-                user_preference.long_context_llm,
-                user_preference.strategic_llm,
-            ]:
-                if preferred_llm and getattr(preferred_llm, "language", None):
-                    language = preferred_llm.language
-                    break
-
-        if not language:
-            first_llm_config = llm_configs[0]
+        if search_space.llm_configs:
+            # Get language from first LLM config
+            first_llm_config = search_space.llm_configs[0]
             language = getattr(first_llm_config, "language", None)
 
     except HTTPException:
-        raise HTTPException(
-            status_code=403, detail="You don't have access to this search space"
-        ) from None
+        raise
 
     langchain_chat_history = []
     for message in messages[:-1]:
@@ -116,7 +87,7 @@ async def handle_chat_data(
     response = StreamingResponse(
         stream_connector_search_results(
             user_query,
-            user.id,
+            None,  # No user_id anymore
             search_space_id,
             session,
             research_mode,
@@ -137,10 +108,18 @@ async def handle_chat_data(
 async def create_chat(
     chat: ChatCreate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        await check_ownership(session, SearchSpace, chat.search_space_id, user)
+        # Verify search space exists
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == chat.search_space_id)
+        )
+        if not result.scalars().first():
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
+
         db_chat = Chat(**chat.model_dump())
         session.add(db_chat)
         await session.commit()
@@ -173,7 +152,6 @@ async def read_chats(
     limit: int = 100,
     search_space_id: int | None = None,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     # Validate pagination parameters
     if skip < 0:
@@ -191,17 +169,13 @@ async def read_chats(
         )
     try:
         # Select specific fields excluding messages
-        query = (
-            select(
-                Chat.id,
-                Chat.type,
-                Chat.title,
-                Chat.initial_connectors,
-                Chat.search_space_id,
-                Chat.created_at,
-            )
-            .join(SearchSpace)
-            .filter(SearchSpace.user_id == user.id)
+        query = select(
+            Chat.id,
+            Chat.type,
+            Chat.title,
+            Chat.initial_connectors,
+            Chat.search_space_id,
+            Chat.created_at,
         )
 
         # Filter by search_space_id if provided
@@ -224,19 +198,16 @@ async def read_chats(
 async def read_chat(
     chat_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
         result = await session.execute(
-            select(Chat)
-            .join(SearchSpace)
-            .filter(Chat.id == chat_id, SearchSpace.user_id == user.id)
+            select(Chat).filter(Chat.id == chat_id)
         )
         chat = result.scalars().first()
         if not chat:
             raise HTTPException(
                 status_code=404,
-                detail="Chat not found or you don't have permission to access it",
+                detail="Chat not found",
             )
         return chat
     except OperationalError:
@@ -255,10 +226,9 @@ async def update_chat(
     chat_id: int,
     chat_update: ChatUpdate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        db_chat = await read_chat(chat_id, session, user)
+        db_chat = await read_chat(chat_id, session)
         update_data = chat_update.model_dump(exclude_unset=True)
         for key, value in update_data.items():
             setattr(db_chat, key, value)
@@ -290,10 +260,9 @@ async def update_chat(
 async def delete_chat(
     chat_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        db_chat = await read_chat(chat_id, session, user)
+        db_chat = await read_chat(chat_id, session)
         await session.delete(db_chat)
         await session.commit()
         return {"message": "Chat deleted successfully"}

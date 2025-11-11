@@ -2,10 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from app.db import SearchSpace, User, get_async_session
+from app.db import SearchSpace, get_async_session
 from app.schemas import SearchSpaceCreate, SearchSpaceRead, SearchSpaceUpdate
-from app.users import current_active_user
-from app.utils.check_ownership import check_ownership
 
 router = APIRouter(tags=["search-spaces"])
 
@@ -14,10 +12,9 @@ router = APIRouter(tags=["search-spaces"])
 async def create_search_space(
     search_space: SearchSpaceCreate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        db_search_space = SearchSpace(**search_space.model_dump(), user_id=user.id)
+        db_search_space = SearchSpace(**search_space.model_dump())
         session.add(db_search_space)
         await session.commit()
         await session.refresh(db_search_space)
@@ -36,14 +33,10 @@ async def read_search_spaces(
     skip: int = 0,
     limit: int = 200,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
         result = await session.execute(
-            select(SearchSpace)
-            .filter(SearchSpace.user_id == user.id)
-            .offset(skip)
-            .limit(limit)
+            select(SearchSpace).offset(skip).limit(limit)
         )
         return result.scalars().all()
     except Exception as e:
@@ -56,12 +49,17 @@ async def read_search_spaces(
 async def read_search_space(
     search_space_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        search_space = await check_ownership(
-            session, SearchSpace, search_space_id, user
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == search_space_id)
         )
+        search_space = result.scalars().first()
+        if not search_space:
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
         return search_space
 
     except HTTPException:
@@ -77,12 +75,17 @@ async def update_search_space(
     search_space_id: int,
     search_space_update: SearchSpaceUpdate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        db_search_space = await check_ownership(
-            session, SearchSpace, search_space_id, user
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == search_space_id)
         )
+        db_search_space = result.scalars().first()
+        if not db_search_space:
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
         update_data = search_space_update.model_dump(exclude_unset=True)
         for key, value in update_data.items():
             setattr(db_search_space, key, value)
@@ -102,12 +105,17 @@ async def update_search_space(
 async def delete_search_space(
     search_space_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     try:
-        db_search_space = await check_ownership(
-            session, SearchSpace, search_space_id, user
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == search_space_id)
         )
+        db_search_space = result.scalars().first()
+        if not db_search_space:
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
         await session.delete(db_search_space)
         await session.commit()
         return {"message": "Search space deleted successfully"}

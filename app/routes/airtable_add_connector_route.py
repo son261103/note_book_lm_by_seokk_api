@@ -18,11 +18,9 @@ from app.config import config
 from app.db import (
     SearchSourceConnector,
     SearchSourceConnectorType,
-    User,
     get_async_session,
 )
 from app.schemas.airtable_auth_credentials import AirtableAuthCredentialsBase
-from app.users import current_active_user
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +68,12 @@ def generate_pkce_pair() -> tuple[str, str]:
 
 
 @router.get("/auth/airtable/connector/add")
-async def connect_airtable(space_id: int, user: User = Depends(current_active_user)):
+async def connect_airtable(space_id: int):
     """
     Initiate Airtable OAuth flow.
 
     Args:
         space_id: The search space ID
-        user: Current authenticated user
 
     Returns:
         Authorization URL for redirect
@@ -97,7 +94,6 @@ async def connect_airtable(space_id: int, user: User = Depends(current_active_us
         state_payload = json.dumps(
             {
                 "space_id": space_id,
-                "user_id": str(user.id),
                 "code_verifier": code_verifier,
             }
         )
@@ -120,7 +116,7 @@ async def connect_airtable(space_id: int, user: User = Depends(current_active_us
         auth_url = f"{AUTHORIZATION_URL}?{urlencode(auth_params)}"
 
         logger.info(
-            f"Generated Airtable OAuth URL for user {user.id}, space {space_id}"
+            f"Generated Airtable OAuth URL for space {space_id}"
         )
         return {"auth_url": auth_url}
 
@@ -160,7 +156,6 @@ async def airtable_callback(
                 status_code=400, detail=f"Invalid state parameter: {e!s}"
             ) from e
 
-        user_id = UUID(data["user_id"])
         space_id = data["space_id"]
         code_verifier = data["code_verifier"]
         auth_header = make_basic_auth_header(
@@ -217,11 +212,10 @@ async def airtable_callback(
             scope=token_json.get("scope"),
         )
 
-        # Check if connector already exists for this search space and user
+        # Check if connector already exists for this search space
         existing_connector_result = await session.execute(
             select(SearchSourceConnector).filter(
                 SearchSourceConnector.search_space_id == space_id,
-                SearchSourceConnector.user_id == user_id,
                 SearchSourceConnector.connector_type
                 == SearchSourceConnectorType.AIRTABLE_CONNECTOR,
             )
@@ -234,7 +228,7 @@ async def airtable_callback(
             existing_connector.name = "Airtable Connector"
             existing_connector.is_indexable = True
             logger.info(
-                f"Updated existing Airtable connector for user {user_id} in space {space_id}"
+                f"Updated existing Airtable connector in space {space_id}"
             )
         else:
             # Create new connector
@@ -244,16 +238,15 @@ async def airtable_callback(
                 is_indexable=True,
                 config=credentials.to_dict(),
                 search_space_id=space_id,
-                user_id=user_id,
             )
             session.add(new_connector)
             logger.info(
-                f"Created new Airtable connector for user {user_id} in space {space_id}"
+                f"Created new Airtable connector in space {space_id}"
             )
 
         try:
             await session.commit()
-            logger.info(f"Successfully saved Airtable connector for user {user_id}")
+            logger.info(f"Successfully saved Airtable connector for space {space_id}")
 
             # Redirect to the frontend success page
             return RedirectResponse(

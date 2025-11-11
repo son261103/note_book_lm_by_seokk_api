@@ -5,10 +5,8 @@ from sqlalchemy import and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from app.db import Log, LogLevel, LogStatus, SearchSpace, User, get_async_session
+from app.db import Log, LogLevel, LogStatus, SearchSpace, get_async_session
 from app.schemas import LogCreate, LogRead, LogUpdate
-from app.users import current_active_user
-from app.utils.check_ownership import check_ownership
 
 router = APIRouter(tags=["logs"])
 
@@ -17,12 +15,18 @@ router = APIRouter(tags=["logs"])
 async def create_log(
     log: LogCreate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """Create a new log entry."""
     try:
-        # Check if the user owns the search space
-        await check_ownership(session, SearchSpace, log.search_space_id, user)
+        # Verify search space exists
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == log.search_space_id)
+        )
+        if not result.scalars().first():
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
 
         db_log = Log(**log.model_dump())
         session.add(db_log)
@@ -49,23 +53,25 @@ async def read_logs(
     start_date: datetime | None = None,
     end_date: datetime | None = None,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """Get logs with optional filtering."""
     try:
-        # Build base query - only logs from user's search spaces
-        query = (
-            select(Log)
-            .join(SearchSpace)
-            .filter(SearchSpace.user_id == user.id)
-            .order_by(desc(Log.created_at))  # Most recent first
-        )
+        # Build base query
+        query = select(Log).order_by(desc(Log.created_at))  # Most recent first
 
         # Apply filters
         filters = []
 
         if search_space_id is not None:
-            await check_ownership(session, SearchSpace, search_space_id, user)
+            # Verify search space exists
+            result = await session.execute(
+                select(SearchSpace).filter(SearchSpace.id == search_space_id)
+            )
+            if not result.scalars().first():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Search space not found",
+                )
             filters.append(Log.search_space_id == search_space_id)
 
         if level is not None:
@@ -102,16 +108,11 @@ async def read_logs(
 async def read_log(
     log_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """Get a specific log by ID."""
     try:
-        # Get log and verify user owns the search space
-        result = await session.execute(
-            select(Log)
-            .join(SearchSpace)
-            .filter(Log.id == log_id, SearchSpace.user_id == user.id)
-        )
+        # Get log
+        result = await session.execute(select(Log).filter(Log.id == log_id))
         log = result.scalars().first()
 
         if not log:
@@ -131,16 +132,11 @@ async def update_log(
     log_id: int,
     log_update: LogUpdate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """Update a log entry."""
     try:
-        # Get log and verify user owns the search space
-        result = await session.execute(
-            select(Log)
-            .join(SearchSpace)
-            .filter(Log.id == log_id, SearchSpace.user_id == user.id)
-        )
+        # Get log
+        result = await session.execute(select(Log).filter(Log.id == log_id))
         db_log = result.scalars().first()
 
         if not db_log:
@@ -167,16 +163,11 @@ async def update_log(
 async def delete_log(
     log_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """Delete a log entry."""
     try:
-        # Get log and verify user owns the search space
-        result = await session.execute(
-            select(Log)
-            .join(SearchSpace)
-            .filter(Log.id == log_id, SearchSpace.user_id == user.id)
-        )
+        # Get log
+        result = await session.execute(select(Log).filter(Log.id == log_id))
         db_log = result.scalars().first()
 
         if not db_log:
@@ -199,12 +190,18 @@ async def get_logs_summary(
     search_space_id: int,
     hours: int = 24,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """Get a summary of logs for a search space in the last X hours."""
     try:
-        # Check ownership
-        await check_ownership(session, SearchSpace, search_space_id, user)
+        # Verify search space exists
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == search_space_id)
+        )
+        if not result.scalars().first():
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
 
         # Calculate time window
         since = datetime.utcnow().replace(microsecond=0) - timedelta(hours=hours)

@@ -25,7 +25,6 @@ from app.db import (
     SearchSourceConnector,
     SearchSourceConnectorType,
     SearchSpace,
-    User,
     async_session_maker,
     get_async_session,
 )
@@ -50,8 +49,6 @@ from app.tasks.connector_indexers import (
     index_notion_pages,
     index_slack_messages,
 )
-from app.users import current_active_user
-from app.utils.check_ownership import check_ownership
 from app.utils.periodic_scheduler import (
     create_periodic_schedule,
     delete_periodic_schedule,
@@ -73,7 +70,6 @@ class GitHubPATRequest(BaseModel):
 @router.post("/github/repositories", response_model=list[dict[str, Any]])
 async def list_github_repositories(
     pat_request: GitHubPATRequest,
-    user: User = Depends(current_active_user),  # Ensure the user is logged in
 ):
     """
     Fetches a list of repositories accessible by the provided GitHub PAT.
@@ -87,10 +83,10 @@ async def list_github_repositories(
         return repositories
     except ValueError as e:
         # Handle invalid token error specifically
-        logger.error(f"GitHub PAT validation failed for user {user.id}: {e!s}")
+        logger.error(f"GitHub PAT validation failed: {e!s}")
         raise HTTPException(status_code=400, detail=f"Invalid GitHub PAT: {e!s}") from e
     except Exception as e:
-        logger.error(f"Failed to fetch GitHub repositories for user {user.id}: {e!s}")
+        logger.error(f"Failed to fetch GitHub repositories: {e!s}")
         raise HTTPException(
             status_code=500, detail="Failed to fetch GitHub repositories."
         ) from e
@@ -103,23 +99,28 @@ async def create_search_source_connector(
         ..., description="ID of the search space to associate the connector with"
     ),
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """
     Create a new search source connector.
 
-    Each search space can have only one connector of each type per user (based on search_space_id, user_id, and connector_type).
+    Each search space can have only one connector of each type (based on search_space_id and connector_type).
     The config must contain the appropriate keys for the connector type.
     """
     try:
-        # Check if the search space belongs to the user
-        await check_ownership(session, SearchSpace, search_space_id, user)
+        # Verify search space exists
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == search_space_id)
+        )
+        if not result.scalars().first():
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
 
-        # Check if a connector with the same type already exists for this search space and user
+        # Check if a connector with the same type already exists for this search space
         result = await session.execute(
             select(SearchSourceConnector).filter(
                 SearchSourceConnector.search_space_id == search_space_id,
-                SearchSourceConnector.user_id == user.id,
                 SearchSourceConnector.connector_type == connector.connector_type,
             )
         )
@@ -127,7 +128,7 @@ async def create_search_source_connector(
         if existing_connector:
             raise HTTPException(
                 status_code=409,
-                detail=f"A connector with type {connector.connector_type} already exists in this search space. Each search space can have only one connector of each type per user.",
+                detail=f"A connector with type {connector.connector_type} already exists in this search space.",
             )
 
         # Prepare connector data
@@ -144,7 +145,7 @@ async def create_search_source_connector(
             )
 
         db_connector = SearchSourceConnector(
-            **connector_data, search_space_id=search_space_id, user_id=user.id
+            **connector_data, search_space_id=search_space_id
         )
         session.add(db_connector)
         await session.commit()
@@ -158,7 +159,7 @@ async def create_search_source_connector(
             success = create_periodic_schedule(
                 connector_id=db_connector.id,
                 search_space_id=search_space_id,
-                user_id=str(user.id),
+                user_id=None,  # No user_id
                 connector_type=db_connector.connector_type,
                 frequency_minutes=db_connector.indexing_frequency_minutes,
             )
@@ -195,18 +196,22 @@ async def read_search_source_connectors(
     limit: int = 100,
     search_space_id: int | None = None,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
-    """List all search source connectors for the current user, optionally filtered by search space."""
+    """List all search source connectors, optionally filtered by search space."""
     try:
-        query = select(SearchSourceConnector).filter(
-            SearchSourceConnector.user_id == user.id
-        )
+        query = select(SearchSourceConnector)
 
         # Filter by search_space_id if provided
         if search_space_id is not None:
-            # Verify the search space belongs to the user
-            await check_ownership(session, SearchSpace, search_space_id, user)
+            # Verify the search space exists
+            result = await session.execute(
+                select(SearchSpace).filter(SearchSpace.id == search_space_id)
+            )
+            if not result.scalars().first():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Search space not found",
+                )
             query = query.filter(
                 SearchSourceConnector.search_space_id == search_space_id
             )
@@ -226,11 +231,19 @@ async def read_search_source_connectors(
 async def read_search_source_connector(
     connector_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """Get a specific search source connector by ID."""
     try:
-        return await check_ownership(session, SearchSourceConnector, connector_id, user)
+        result = await session.execute(
+            select(SearchSourceConnector).filter(SearchSourceConnector.id == connector_id)
+        )
+        connector = result.scalars().first()
+        if not connector:
+            raise HTTPException(
+                status_code=404,
+                detail="Search source connector not found",
+            )
+        return connector
     except HTTPException:
         raise
     except Exception as e:
@@ -246,15 +259,21 @@ async def update_search_source_connector(
     connector_id: int,
     connector_update: SearchSourceConnectorUpdate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """
     Update a search source connector.
     Handles partial updates, including merging changes into the 'config' field.
     """
-    db_connector = await check_ownership(
-        session, SearchSourceConnector, connector_id, user
+    # Get the connector
+    result = await session.execute(
+        select(SearchSourceConnector).filter(SearchSourceConnector.id == connector_id)
     )
+    db_connector = result.scalars().first()
+    if not db_connector:
+        raise HTTPException(
+            status_code=404,
+            detail="Search source connector not found",
+        )
 
     # Convert the sparse update data (only fields present in request) to a dict
     update_data = connector_update.model_dump(exclude_unset=True)
@@ -352,7 +371,6 @@ async def update_search_source_connector(
                 select(SearchSourceConnector).filter(
                     SearchSourceConnector.search_space_id
                     == db_connector.search_space_id,
-                    SearchSourceConnector.user_id == user.id,
                     SearchSourceConnector.connector_type == value,
                     SearchSourceConnector.id != connector_id,
                 )
@@ -361,7 +379,7 @@ async def update_search_source_connector(
             if existing_connector:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"A connector with type {value} already exists in this search space. Each search space can have only one connector of each type per user.",
+                    detail=f"A connector with type {value} already exists in this search space.",
                 )
 
         setattr(db_connector, key, value)
@@ -383,7 +401,7 @@ async def update_search_source_connector(
                 success = update_periodic_schedule(
                     connector_id=db_connector.id,
                     search_space_id=db_connector.search_space_id,
-                    user_id=str(user.id),
+                    user_id=None,  # No user_id
                     connector_type=db_connector.connector_type,
                     frequency_minutes=db_connector.indexing_frequency_minutes,
                 )
@@ -422,13 +440,19 @@ async def update_search_source_connector(
 async def delete_search_source_connector(
     connector_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """Delete a search source connector."""
     try:
-        db_connector = await check_ownership(
-            session, SearchSourceConnector, connector_id, user
+        # Get the connector
+        result = await session.execute(
+            select(SearchSourceConnector).filter(SearchSourceConnector.id == connector_id)
         )
+        db_connector = result.scalars().first()
+        if not db_connector:
+            raise HTTPException(
+                status_code=404,
+                detail="Search source connector not found",
+            )
 
         # Delete any periodic schedule associated with this connector
         if db_connector.periodic_indexing_enabled:
@@ -468,7 +492,6 @@ async def index_connector_content(
         description="End date for indexing (YYYY-MM-DD format). If not provided, uses today's date",
     ),
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     """
     Index content from a connector to a search space.
@@ -492,15 +515,26 @@ async def index_connector_content(
         Dictionary with indexing status
     """
     try:
-        # Check if the connector belongs to the user
-        connector = await check_ownership(
-            session, SearchSourceConnector, connector_id, user
+        # Get the connector
+        result = await session.execute(
+            select(SearchSourceConnector).filter(SearchSourceConnector.id == connector_id)
         )
+        connector = result.scalars().first()
+        if not connector:
+            raise HTTPException(
+                status_code=404,
+                detail="Search source connector not found",
+            )
 
-        # Check if the search space belongs to the user
-        _search_space = await check_ownership(
-            session, SearchSpace, search_space_id, user
+        # Verify the search space exists
+        result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == search_space_id)
         )
+        if not result.scalars().first():
+            raise HTTPException(
+                status_code=404,
+                detail="Search space not found",
+            )
 
         # Handle different connector types
         response_message = ""
@@ -534,7 +568,7 @@ async def index_connector_content(
                 f"Triggering Slack indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_slack_messages_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Slack indexing started in the background."
 
@@ -545,7 +579,7 @@ async def index_connector_content(
                 f"Triggering Notion indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_notion_pages_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Notion indexing started in the background."
 
@@ -556,7 +590,7 @@ async def index_connector_content(
                 f"Triggering GitHub indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_github_repos_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "GitHub indexing started in the background."
 
@@ -567,7 +601,7 @@ async def index_connector_content(
                 f"Triggering Linear indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_linear_issues_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Linear indexing started in the background."
 
@@ -578,7 +612,7 @@ async def index_connector_content(
                 f"Triggering Jira indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_jira_issues_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Jira indexing started in the background."
 
@@ -591,7 +625,7 @@ async def index_connector_content(
                 f"Triggering Confluence indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_confluence_pages_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Confluence indexing started in the background."
 
@@ -602,7 +636,7 @@ async def index_connector_content(
                 f"Triggering ClickUp indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_clickup_tasks_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "ClickUp indexing started in the background."
 
@@ -618,7 +652,7 @@ async def index_connector_content(
                 f"Triggering Google Calendar indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_google_calendar_events_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Google Calendar indexing started in the background."
         elif connector.connector_type == SearchSourceConnectorType.AIRTABLE_CONNECTOR:
@@ -630,7 +664,7 @@ async def index_connector_content(
                 f"Triggering Airtable indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_airtable_records_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Airtable indexing started in the background."
         elif (
@@ -644,7 +678,7 @@ async def index_connector_content(
                 f"Triggering Google Gmail indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_google_gmail_messages_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Google Gmail indexing started in the background."
 
@@ -657,7 +691,7 @@ async def index_connector_content(
                 f"Triggering Discord indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_discord_messages_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Discord indexing started in the background."
 
@@ -668,7 +702,7 @@ async def index_connector_content(
                 f"Triggering Luma indexing for connector {connector_id} into search space {search_space_id} from {indexing_from} to {indexing_to}"
             )
             index_luma_events_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Luma indexing started in the background."
 
@@ -684,7 +718,7 @@ async def index_connector_content(
                 f"Triggering Elasticsearch indexing for connector {connector_id} into search space {search_space_id}"
             )
             index_elasticsearch_documents_task.delay(
-                connector_id, search_space_id, str(user.id), indexing_from, indexing_to
+                connector_id, search_space_id, None, indexing_from, indexing_to
             )
             response_message = "Elasticsearch indexing started in the background."
 

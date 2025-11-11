@@ -3,7 +3,6 @@ from datetime import UTC, datetime
 from enum import Enum
 
 from fastapi import Depends
-from fastapi_users.db import SQLAlchemyBaseUserTableUUID, SQLAlchemyUserDatabase
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     ARRAY,
@@ -19,16 +18,12 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, relationship
+from sqlalchemy.orm import DeclarativeBase, declared_attr, relationship
 
 from app.config import config
 from app.retriver.chunks_hybrid_search import ChucksHybridSearchRetriever
 from app.retriver.documents_hybrid_search import DocumentHybridSearchRetriever
-
-if config.AUTH_TYPE == "GOOGLE":
-    from fastapi_users.db import SQLAlchemyBaseOAuthAccountTableUUID
 
 DATABASE_URL = config.DATABASE_URL
 
@@ -216,11 +211,6 @@ class SearchSpace(BaseModel, TimestampMixin):
     name = Column(String(100), nullable=False, index=True)
     description = Column(String(500), nullable=True)
 
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("user.id", ondelete="CASCADE"), nullable=False
-    )
-    user = relationship("User", back_populates="search_spaces")
-
     documents = relationship(
         "Document",
         back_populates="search_space",
@@ -257,11 +247,6 @@ class SearchSpace(BaseModel, TimestampMixin):
         order_by="LLMConfig.id",
         cascade="all, delete-orphan",
     )
-    user_preferences = relationship(
-        "UserSearchSpacePreference",
-        back_populates="search_space",
-        cascade="all, delete-orphan",
-    )
 
 
 class SearchSourceConnector(BaseModel, TimestampMixin):
@@ -269,9 +254,8 @@ class SearchSourceConnector(BaseModel, TimestampMixin):
     __table_args__ = (
         UniqueConstraint(
             "search_space_id",
-            "user_id",
             "connector_type",
-            name="uq_searchspace_user_connector_type",
+            name="uq_searchspace_connector_type",
         ),
     )
 
@@ -291,10 +275,6 @@ class SearchSourceConnector(BaseModel, TimestampMixin):
     )
     search_space = relationship(
         "SearchSpace", back_populates="search_source_connectors"
-    )
-
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("user.id", ondelete="CASCADE"), nullable=False
     )
 
 
@@ -323,50 +303,6 @@ class LLMConfig(BaseModel, TimestampMixin):
     search_space = relationship("SearchSpace", back_populates="llm_configs")
 
 
-class UserSearchSpacePreference(BaseModel, TimestampMixin):
-    __tablename__ = "user_search_space_preferences"
-    __table_args__ = (
-        UniqueConstraint(
-            "user_id",
-            "search_space_id",
-            name="uq_user_searchspace",
-        ),
-    )
-
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("user.id", ondelete="CASCADE"), nullable=False
-    )
-    search_space_id = Column(
-        Integer, ForeignKey("searchspaces.id", ondelete="CASCADE"), nullable=False
-    )
-
-    # User-specific LLM preferences for this search space
-    long_context_llm_id = Column(
-        Integer, ForeignKey("llm_configs.id", ondelete="SET NULL"), nullable=True
-    )
-    fast_llm_id = Column(
-        Integer, ForeignKey("llm_configs.id", ondelete="SET NULL"), nullable=True
-    )
-    strategic_llm_id = Column(
-        Integer, ForeignKey("llm_configs.id", ondelete="SET NULL"), nullable=True
-    )
-
-    # Future RBAC fields can be added here
-    # role = Column(String(50), nullable=True)  # e.g., 'owner', 'editor', 'viewer'
-    # permissions = Column(JSON, nullable=True)
-
-    user = relationship("User", back_populates="search_space_preferences")
-    search_space = relationship("SearchSpace", back_populates="user_preferences")
-
-    long_context_llm = relationship(
-        "LLMConfig", foreign_keys=[long_context_llm_id], post_update=True
-    )
-    fast_llm = relationship("LLMConfig", foreign_keys=[fast_llm_id], post_update=True)
-    strategic_llm = relationship(
-        "LLMConfig", foreign_keys=[strategic_llm_id], post_update=True
-    )
-
-
 class Log(BaseModel, TimestampMixin):
     __tablename__ = "logs"
 
@@ -382,41 +318,6 @@ class Log(BaseModel, TimestampMixin):
         Integer, ForeignKey("searchspaces.id", ondelete="CASCADE"), nullable=False
     )
     search_space = relationship("SearchSpace", back_populates="logs")
-
-
-if config.AUTH_TYPE == "GOOGLE":
-
-    class OAuthAccount(SQLAlchemyBaseOAuthAccountTableUUID, Base):
-        pass
-
-    class User(SQLAlchemyBaseUserTableUUID, Base):
-        oauth_accounts: Mapped[list[OAuthAccount]] = relationship(
-            "OAuthAccount", lazy="joined"
-        )
-        search_spaces = relationship("SearchSpace", back_populates="user")
-        search_space_preferences = relationship(
-            "UserSearchSpacePreference",
-            back_populates="user",
-            cascade="all, delete-orphan",
-        )
-
-        # Page usage tracking for ETL services
-        pages_limit = Column(Integer, nullable=False, default=500, server_default="500")
-        pages_used = Column(Integer, nullable=False, default=0, server_default="0")
-
-else:
-
-    class User(SQLAlchemyBaseUserTableUUID, Base):
-        search_spaces = relationship("SearchSpace", back_populates="user")
-        search_space_preferences = relationship(
-            "UserSearchSpacePreference",
-            back_populates="user",
-            cascade="all, delete-orphan",
-        )
-
-        # Page usage tracking for ETL services
-        pages_limit = Column(Integer, nullable=False, default=500, server_default="500")
-        pages_used = Column(Integer, nullable=False, default=0, server_default="0")
 
 
 engine = create_async_engine(DATABASE_URL)
@@ -460,17 +361,6 @@ async def create_db_and_tables():
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_maker() as session:
         yield session
-
-
-if config.AUTH_TYPE == "GOOGLE":
-
-    async def get_user_db(session: AsyncSession = Depends(get_async_session)):
-        yield SQLAlchemyUserDatabase(session, User, OAuthAccount)
-
-else:
-
-    async def get_user_db(session: AsyncSession = Depends(get_async_session)):
-        yield SQLAlchemyUserDatabase(session, User)
 
 
 async def get_chucks_hybrid_search_retriever(
